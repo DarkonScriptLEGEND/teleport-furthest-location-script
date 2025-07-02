@@ -1,0 +1,228 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+-- UI setup
+local ScreenGui = Instance.new("ScreenGui", player.PlayerGui)
+ScreenGui.Name = "TeleportGui"
+
+local teleportBtn = Instance.new("TextButton", ScreenGui)
+teleportBtn.Size = UDim2.new(0, 140, 0, 40)
+teleportBtn.Position = UDim2.new(0, 10, 0, 10)
+teleportBtn.Text = "Teleport Furthest"
+teleportBtn.BackgroundColor3 = Color3.fromRGB(70, 130, 180)
+teleportBtn.TextColor3 = Color3.new(1,1,1)
+teleportBtn.Font = Enum.Font.SourceSansBold
+teleportBtn.TextScaled = true
+
+local autoBtn = Instance.new("TextButton", ScreenGui)
+autoBtn.Size = UDim2.new(0, 140, 0, 40)
+autoBtn.Position = UDim2.new(0, 160, 0, 10)
+autoBtn.Text = "Auto Teleport: OFF"
+autoBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+autoBtn.TextColor3 = Color3.new(1,1,1)
+autoBtn.Font = Enum.Font.SourceSansBold
+autoBtn.TextScaled = true
+
+-- Cooldown setup
+local canTeleport = true
+local cooldownTime = 4
+
+-- Create sound instance for teleport
+local teleportSound = Instance.new("Sound", humanoidRootPart)
+teleportSound.SoundId = "rbxassetid://2801263" -- teleport woosh sound
+teleportSound.Volume = 0.7
+
+-- Create flash frame for visual feedback
+local flashFrame = Instance.new("Frame", ScreenGui)
+flashFrame.BackgroundColor3 = Color3.new(1,1,1)
+flashFrame.Size = UDim2.new(1,0,1,0)
+flashFrame.BackgroundTransparency = 1
+flashFrame.ZIndex = 10
+
+-- Helper: Checks if a position is safe (not inside a wall or out of bounds)
+local function isSafePosition(pos)
+    -- Raycast downward to find ground
+    local rayOrigin = pos + Vector3.new(0, 5, 0)
+    local rayDirection = Vector3.new(0, -10, 0)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {character}
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+    local result = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+    if result then
+        local groundY = result.Position.Y
+        -- Position should be just above ground
+        if pos.Y < groundY + 0.6 and pos.Y > groundY - 1 then
+            -- Check if inside walls by region overlap
+            local region = Region3.new(pos - Vector3.new(2,2,2), pos + Vector3.new(2,2,2))
+            local parts = workspace:FindPartsInRegion3WithIgnoreList(region, {character}, 10)
+            for _, part in pairs(parts) do
+                if part.CanCollide and not part:IsDescendantOf(character) then
+                    return false
+                end
+            end
+            -- Prevent too close to void (low Y)
+            if pos.Y < 5 then
+                return false
+            end
+            return true
+        end
+    end
+    return false
+end
+
+-- Find workspace boundaries (roughly)
+local function getBounds()
+    local minVec = Vector3.new(math.huge, math.huge, math.huge)
+    local maxVec = Vector3.new(-math.huge, -math.huge, -math.huge)
+    for _, part in pairs(workspace:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local pos = part.Position
+            local size = part.Size
+            local partMin = pos - size/2
+            local partMax = pos + size/2
+            minVec = Vector3.new(
+                math.min(minVec.X, partMin.X),
+                math.min(minVec.Y, partMin.Y),
+                math.min(minVec.Z, partMin.Z)
+            )
+            maxVec = Vector3.new(
+                math.max(maxVec.X, partMax.X),
+                math.max(maxVec.Y, partMax.Y),
+                math.max(maxVec.Z, partMax.Z)
+            )
+        end
+    end
+    return minVec, maxVec
+end
+
+local currentTarget = nil
+
+-- Improved function: Scan grid points in workspace bounds to find the furthest safe position
+local function findFurthestPosition()
+    local minVec, maxVec = getBounds()
+    local playerPos = humanoidRootPart.Position
+    local step = 20 -- grid step size, bigger = faster but less precise
+    local furthestPos = nil
+    local maxDistance = 0
+
+    for x = minVec.X, maxVec.X, step do
+        for z = minVec.Z, maxVec.Z, step do
+            local testPos = Vector3.new(x, maxVec.Y + 10, z)
+            -- Raycast down from high above
+            local rayOrigin = testPos
+            local rayDirection = Vector3.new(0, -100, 0)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+            local result = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+            if result then
+                local groundPos = result.Position + Vector3.new(0, 2, 0)
+                if isSafePosition(groundPos) then
+                    local dist = (groundPos - playerPos).Magnitude
+                    if dist > maxDistance then
+                        maxDistance = dist
+                        furthestPos = groundPos
+                    end
+                end
+            end
+        end
+    end
+
+    return furthestPos or playerPos
+end
+
+-- Create particle effect on teleport
+local function createTeleportParticles(position)
+    local particlePart = Instance.new("Part")
+    particlePart.Size = Vector3.new(1,1,1)
+    particlePart.Anchored = true
+    particlePart.CanCollide = false
+    particlePart.Transparency = 1
+    particlePart.Position = position
+    particlePart.Parent = workspace
+
+    local particleEmitter = Instance.new("ParticleEmitter", particlePart)
+    particleEmitter.Texture = "rbxassetid://258128463" -- sparkle texture
+    particleEmitter.Rate = 100
+    particleEmitter.Lifetime = NumberRange.new(0.5)
+    particleEmitter.Speed = NumberRange.new(5)
+    particleEmitter.Size = NumberSequence.new(1)
+    particleEmitter.EmissionDirection = Enum.NormalId.Top
+    particleEmitter.LightEmission = 1
+    particleEmitter.RotSpeed = NumberRange.new(200)
+    particleEmitter.Enabled = true
+
+    Debris:AddItem(particlePart, 1)
+end
+
+local function flashScreen()
+    flashFrame.BackgroundTransparency = 0.2
+    local tween = TweenService:Create(flashFrame, TweenInfo.new(0.4), {BackgroundTransparency = 1})
+    tween:Play()
+end
+
+local function teleportToFurthest()
+    if not canTeleport then return end
+    canTeleport = false
+
+    local targetPos = findFurthestPosition()
+
+    -- Make sure new position is different enough from last
+    if currentTarget and (targetPos - currentTarget).Magnitude < 5 then
+        targetPos = targetPos + Vector3.new(math.random(-20,20),0,math.random(-20,20))
+        if not isSafePosition(targetPos) then
+            targetPos = currentTarget
+        end
+    end
+
+    currentTarget = targetPos
+
+    -- Play teleport sound
+    teleportSound:Play()
+    -- Create particles
+    createTeleportParticles(targetPos)
+    -- Flash screen
+    flashScreen()
+
+    -- Teleport character HumanoidRootPart
+    humanoidRootPart.CFrame = CFrame.new(targetPos.X, targetPos.Y + 2, targetPos.Z)
+
+    wait(cooldownTime)
+    canTeleport = true
+end
+
+-- Button Clicks
+teleportBtn.MouseButton1Click:Connect(function()
+    teleportToFurthest()
+end)
+
+local autoTeleporting = false
+autoBtn.MouseButton1Click:Connect(function()
+    autoTeleporting = not autoTeleporting
+    if autoTeleporting then
+        autoBtn.Text = "Auto Teleport: ON"
+        autoBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+    else
+        autoBtn.Text = "Auto Teleport: OFF"
+        autoBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+    end
+end)
+
+-- Auto teleport loop
+spawn(function()
+    while true do
+        wait(0.1)
+        if autoTeleporting and canTeleport then
+            teleportToFurthest()
+        end
+    end
+end)
